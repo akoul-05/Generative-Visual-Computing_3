@@ -106,7 +106,39 @@ class MotionAutoencoder(nn.Module):
 
         return x_hat, z
 
+    def _prep_batch(self, batch):
+            """
+            Build the model input [B, C, T] from a dataloader batch.
+            Channels = flattened normalized local positions (+ optional velocities).
+            """
+            # positions_normalized: [B, T, J, 3]
+            pos = batch["positions_normalized"].to(self.device).float()
+            B, T, J, _ = pos.shape
 
+            # flatten joints: [B, T, J*3]
+            x_pos = pos.view(B, T, J * 3)
+
+            # concatenate extra channels if present: trans_vel_xz [B, T, 2], rot_vel_y [B, T] -> [B, T, 1]
+            feats = [x_pos]
+            if ("trans_vel_xz" in batch) and ("rot_vel_y" in batch):
+                tv = batch["trans_vel_xz"].to(self.device).float()          # [B, T, 2]
+                ry = batch["rot_vel_y"].to(self.device).float().unsqueeze(-1)  # [B, T, 1]
+                feats += [tv, ry]
+
+            # [B, T, C] -> [B, C, T]
+            x_btC = torch.cat(feats, dim=-1)              # [B, T, C]
+            x_bCt = x_btC.permute(0, 2, 1).contiguous()   # [B, C, T]
+
+            # pad/truncate channels to match the model's first conv in_channels
+            in_ch = next(self.model.encoder.parameters()).shape[1]
+            cur_ch = x_bCt.size(1)
+            if cur_ch < in_ch:
+                pad = x_bCt.new_zeros(B, in_ch - cur_ch, T)
+                x_bCt = torch.cat([x_bCt, pad], dim=1)
+            elif cur_ch > in_ch:
+                x_bCt = x_bCt[:, :in_ch, :]
+
+            return x_bCt
 
 class MotionManifoldTrainer:
     """Trainer for the Motion Manifold Convolutional Autoencoder"""
@@ -125,6 +157,7 @@ class MotionManifoldTrainer:
         val_split: float = 0.1,
         device: str = None
     ):
+
         self.data_dir = data_dir
         self.output_dir = output_dir
         self.cache_dir = cache_dir if cache_dir else os.path.join(data_dir, "cache")
@@ -160,7 +193,7 @@ class MotionManifoldTrainer:
     def _load_dataset(self):
         """Load the CMU Motion dataset and create training/validation splits"""
         # Create dataset
-        from dataloader2 import CMUMotionDataset
+        #from dataloader2 import CMUMotionDataset
         
         self.dataset = CMUMotionDataset(
             data_dir=self.data_dir,
@@ -185,7 +218,7 @@ class MotionManifoldTrainer:
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=4,
+            num_workers=2,
             pin_memory=True
         )
         
@@ -193,7 +226,7 @@ class MotionManifoldTrainer:
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=4,
+            num_workers=2,
             pin_memory=True
         )
         

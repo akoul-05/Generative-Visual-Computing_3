@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# Outputs
+output/
+*.mp4
+*.gif
+*.npy
+*.pt
+*.png
+*.json
+
+# Data (keep CMU/BVH out of git)
+data/
+cmu-mocap/

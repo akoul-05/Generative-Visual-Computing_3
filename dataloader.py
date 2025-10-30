@@ -121,29 +121,29 @@ class CMUMotionDataset(Dataset):
             
         return f"{param_str}"
     
-    def _compute_statistics(self, motion_data: Dict) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute mean and standard deviation of (which) joint positions"""
-        
-        # TODO: Compute the normalization statistics on the necessary part of motion data.
-        # Save the mean and std to self.mean and self.std.
-
+    def _compute_statistics(self, motion_data):
+        """Compute mean and std over local joint positions across the whole dataset."""
         all_local = []
-        J = None
-        for _, md in motion_data.items():
-            lp = md["local_positions"]  # [T,J,3]
-            if J is None:
-                J = lp.shape[1]
-            all_local.append(lp.reshape(-1, J, 3))
+        for fp, d in motion_data.items():
+            # d["local_positions"]: [T, J, 3]
+            all_local.append(d["local_positions"])
+        all_local = np.concatenate(all_local, axis=0)  # [N, J, 3]
 
-        cat = np.concatenate(all_local, axis=0)  # [sumT, J, 3]
-        self.mean_pose = cat.mean(axis=0)        # [J,3]
-        self.std = cat.std(axis=0) + 1e-8        # [J,3] (epsilon for stability)
+        mean_pose = all_local.mean(axis=0)  # [J,3]
+        std = all_local.std(axis=0)         # [J,3]
+        std[std < 1e-8] = 1e-8              # avoid divide-by-zero
 
+        self.mean_pose = mean_pose
+        self.std = std
+
+        # (optional) persist for reuse
         stats = {"mean_pose": self.mean_pose, "std": self.std}
-        with open(os.path.join(self.cache_dir, f"stats_{self.cache_id}.pkl"), 'wb') as f:
+        os.makedirs(self.cache_dir, exist_ok=True)
+        with open(os.path.join(self.cache_dir, f"stats_{self.cache_id}.pkl"), "wb") as f:
             pickle.dump(stats, f)
 
         return self.mean_pose, self.std
+
 
         
         self.mean_pose = np.zeros_like(motion_data[list(motion_data.keys())[0]]['positions'][0])
@@ -519,7 +519,7 @@ class CMUMotionDataset(Dataset):
         rot_vel_y = motion_data["rot_vel_y"][start_frame:end_frame].copy()
         
         # 3. TODO: Apply normalization to necessary part of the motion data to compute positions_normalized.
-        positions_normalized = None
+        #positions_normalized = None
 
          # ---------- NEW: apply normalization over LOCAL positions ----------
         # self.mean_pose/std have shape [J,3]; broadcast over [T,J,3]

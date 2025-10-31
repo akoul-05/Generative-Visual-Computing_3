@@ -12,6 +12,7 @@ from tqdm import tqdm
 from dataloader import CMUMotionDataset
 from visualization import *
 from dataloader import CMUMotionDataset, recover_global_motion 
+import torch.nn.functional as F
 
 class MotionAutoencoder(nn.Module):
     """
@@ -481,12 +482,33 @@ class MotionManifoldSynthesizer:
             if isinstance(layer, nn.ReLU):
                 feats.append(x)  # collect after ReLU
         return feats, x
+    
+    def _to_model_input(self, positions_local, extras=None):
+        # positions_local: [1,T,J,3] (already local)
+        B, T, J, _ = positions_local.shape
+        Xpos = (positions_local - self.mean_pose) / (self.std + 1e-8)   # [1,T,J,3]
+        parts = [Xpos.view(B, T, J*3)]                                  # [1,T,Cpos]
+        if extras is not None and ("trans_vel_xz" in extras) and ("rot_vel_y" in extras):
+            tv = extras["trans_vel_xz"]; ry = extras["rot_vel_y"]
+            if tv.dim() == 2: tv = tv.unsqueeze(0)                      # [1,T,2]
+            if ry.dim() == 1: ry = ry.unsqueeze(0)                      # [1,T]
+            parts += [tv, ry.unsqueeze(-1)]
+        X = torch.cat(parts, dim=-1).permute(0,2,1).contiguous()        # [1,C,T]
+        in_ch = next(self.model.encoder.parameters()).shape[1]
+        if X.size(1) < in_ch:
+            X = torch.cat([X, X.new_zeros(1, in_ch - X.size(1), X.size(2))], dim=1)
+        elif X.size(1) > in_ch:
+            X = X[:, :in_ch, :]
+        return X, J
+
+    def _from_model_output(self, xhat, J):
+        # xhat: [1,C,T] normalized → local positions [1,T,J,3]
+        pos_ch = J * 3
+        Xhat_pos = xhat[:, :pos_ch, :].permute(0,2,1).contiguous().view(1, -1, J, 3)
+        return Xhat_pos * (self.std + 1e-8) + self.mean_pose
+
 
     def style_transfer(self, content_motion, style_motion, lam_style=1.0, lam_smooth=1e-2, iters=300, lr=5e-2):
-        """
-        Optimize latent z so that decoded motion preserves content frames but matches style statistics.
-        content_motion/style_motion: dicts from dataset (local coords).
-        """
         Pc = content_motion["positions"].to(self.device)
         Ps = style_motion["positions"].to(self.device)
         if Pc.dim()==3: Pc = Pc.unsqueeze(0)
@@ -497,45 +519,55 @@ class MotionManifoldSynthesizer:
         Xc, J = self._to_model_input(Pc, content_motion)
         Xs, _ = self._to_model_input(Ps, style_motion)
 
+        # capture style features from encoder
+        feats_s = []
         with torch.no_grad():
-            feats_s, _ = self.encode_feats(Xs)  # style targets
+            x = Xs
+            for layer in self.model.encoder:
+                x = layer(x)
+                if isinstance(layer, nn.ReLU):
+                    feats_s.append(x)
 
         z = self.model.encode(Xc).clone().detach().requires_grad_(True)
         opt = torch.optim.Adam([z], lr=lr)
 
         for _ in range(iters):
             xhat = self.model.decode(z)
-            if xhat.size(-1)>T: xhat = xhat[..., :T]
-            elif xhat.size(-1)<T: xhat = torch.cat([xhat, xhat.new_zeros(1, xhat.size(1), T-xhat.size(-1))], dim=-1)
+            if xhat.size(-1) > T: xhat = xhat[..., :T]
+            elif xhat.size(-1) < T: xhat = torch.cat([xhat, xhat.new_zeros(1, xhat.size(1), T-xhat.size(-1))], dim=-1)
 
             # content (positions) loss
             P_hat = self._from_model_output(xhat, J)
             Lc = F.mse_loss(P_hat, Pc)
 
-            # style loss: match channel-wise mean/var on encoder ReLU maps
-            feats_hat, _ = self.encode_feats(xhat.detach()*0 + xhat)  # recompute feats from xhat through encoder
+            # style loss: match per-channel mean/var at encoder ReLU layers
+            feats_hat = []
+            x_e = xhat
+            for layer in self.model.encoder:
+                x_e = layer(x_e)
+                if isinstance(layer, nn.ReLU):
+                    feats_hat.append(x_e)
+
             Ls = 0.0
             for F_hat, F_s in zip(feats_hat, feats_s):
-                # [1,C,T’] → stats per-channel
-                mu_hat = F_hat.mean(dim=(-1), keepdim=True)
-                mu_s   = F_s.mean(dim=(-1), keepdim=True)
-                var_hat = F_hat.var(dim=(-1), unbiased=False, keepdim=True)
-                var_s   = F_s.var(dim=(-1), unbiased=False, keepdim=True)
-                Ls = Ls + F.mse_loss(mu_hat, mu_s) + F.mse_loss(var_hat, var_s)
+                mu_hat = F_hat.mean(dim=-1, keepdim=True)
+                mu_s   = F_s.mean(dim=-1, keepdim=True)
+                var_hat = F_hat.var(dim=-1, unbiased=False, keepdim=True)
+                var_s   = F_s.var(dim=-1, unbiased=False, keepdim=True)
+                Ls += F.mse_loss(mu_hat, mu_s) + F.mse_loss(var_hat, var_s)
 
             Lsmooth = lam_smooth * F.mse_loss(z[...,1:], z[...,:-1])
             loss = Lc + lam_style*Ls + Lsmooth
 
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
+            opt.zero_grad(); loss.backward(); opt.step()
 
         with torch.no_grad():
             xhat = self.model.decode(z)
-            if xhat.size(-1)>T: xhat = xhat[..., :T]
-            elif xhat.size(-1)<T: xhat = torch.cat([xhat, xhat.new_zeros(1, xhat.size(1), T-xhat.size(-1))], dim=-1)
+            if xhat.size(-1) > T: xhat = xhat[..., :T]
+            elif xhat.size(-1) < T: xhat = torch.cat([xhat, xhat.new_zeros(1, xhat.size(1), T-xhat.size(-1))], dim=-1)
             P_edit = self._from_model_output(xhat, J)
         return P_edit
+
 
     def _load_normalization(self, dataset: CMUMotionDataset):
         """Load normalization parameters from dataset"""

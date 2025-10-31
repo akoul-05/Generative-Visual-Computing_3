@@ -33,10 +33,8 @@ class MotionAutoencoder(nn.Module):
         self.input_dim = input_dim
         self.latent_dim = latent_dim
 
-        # ----------------
         # Encoder (Conv1d)
         # T -> T/2 -> T/4
-        # ----------------
         self.encoder = nn.Sequential(
             nn.Conv1d(input_dim, 128, kernel_size=7, padding=3),  # keep T
             nn.ReLU(inplace=True),
@@ -50,10 +48,8 @@ class MotionAutoencoder(nn.Module):
             nn.Conv1d(256, latent_dim, kernel_size=3, padding=1)      # latent feature channels
         )
 
-        # --------------------
         # Decoder (ConvTranspose1d)
         # T/4 -> T/2 -> T
-        # --------------------
         self.decoder = nn.Sequential(
             nn.Conv1d(latent_dim, 256, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -162,14 +158,11 @@ class MotionManifoldTrainer:
             Build the model input [B, C, T] from a dataloader batch.
             Channels = flattened normalized local positions (+ optional velocities).
             """
-            # positions_normalized: [B, T, J, 3]
-            pos = batch["positions_normalized"].to(self.device).float()
-            B, T, J, _ = pos.shape
+            position = batch["positions_normalized"].to(self.device).float()
+            B, T, J, _ = position.shape
 
-            # flatten joints: [B, T, J*3]
-            x_pos = pos.view(B, T, J * 3)
+            x_pos = position.view(B, T, J * 3)
 
-            # concatenate extra channels if present: trans_vel_xz [B, T, 2], rot_vel_y [B, T] -> [B, T, 1]
             feats = [x_pos]
             if ("trans_vel_xz" in batch) and ("rot_vel_y" in batch):
                 tv = batch["trans_vel_xz"].to(self.device).float()          # [B, T, 2]
@@ -282,8 +275,7 @@ class MotionManifoldTrainer:
         # TODO: Implement the training phases for the motion autoencoder.
         # There are mutiple training phases described in the paper, you can implement them in this function. You can implement the training phases as separate functions if you prefer or you can use several parameters to combine them to one function.
 
-        # ---- Phase 1: denoising pretrain ----
-        stats_phase1 = self._train_phase(
+        phase = self._train_phase(
             epochs=self.epochs,
             learning_rate=self.learning_rate,
             corruption_prob=0.15,
@@ -291,19 +283,17 @@ class MotionManifoldTrainer:
             phase_name="denoise_pretrain"
         )
 
-        # ---- Phase 2: clean fine-tune ----
-        stats_phase2 = self._train_phase(
+        phase2 = self._train_phase(
             epochs=self.fine_tune_epochs,
             learning_rate=self.fine_tune_lr,
             corruption_prob=0.0,
             sparsity_weight=self.sparsity_weight * 0.5,
             phase_name="finetune"
         )
-        
-        # Combine statistics for plotting
+     
         all_stats = {
-            "denoise_pretrain": stats_phase1,
-            "finetune": stats_phase2
+            "denoise_pretrain": phase,
+            "finetune": phase2
         }
         
         # Save training statistics
@@ -349,7 +339,7 @@ class MotionManifoldTrainer:
             running, n = 0.0, 0
             for batch in progress_bar:
                 # TODO: Implement the training loop for the motion autoencoder.
-                x = self._prep_batch(batch)  # [B,C,T]
+                x = self._prep_batch(batch)
                 x_hat, z = self.model(x, corrupt_input=(corruption_prob > 0.0),
                                       corruption_prob=corruption_prob)
 
@@ -484,16 +474,16 @@ class MotionManifoldSynthesizer:
         return feats, x
     
     def _to_model_input(self, positions_local, extras=None):
-        # positions_local: [1,T,J,3] (already local)
+
         B, T, J, _ = positions_local.shape
-        Xpos = (positions_local - self.mean_pose) / (self.std + 1e-8)   # [1,T,J,3]
-        parts = [Xpos.view(B, T, J*3)]                                  # [1,T,Cpos]
+        Xpos = (positions_local - self.mean_pose) / (self.std + 1e-8)
+        parts = [Xpos.view(B, T, J*3)]
         if extras is not None and ("trans_vel_xz" in extras) and ("rot_vel_y" in extras):
             tv = extras["trans_vel_xz"]; ry = extras["rot_vel_y"]
-            if tv.dim() == 2: tv = tv.unsqueeze(0)                      # [1,T,2]
-            if ry.dim() == 1: ry = ry.unsqueeze(0)                      # [1,T]
+            if tv.dim() == 2: tv = tv.unsqueeze(0)
+            if ry.dim() == 1: ry = ry.unsqueeze(0)
             parts += [tv, ry.unsqueeze(-1)]
-        X = torch.cat(parts, dim=-1).permute(0,2,1).contiguous()        # [1,C,T]
+        X = torch.cat(parts, dim=-1).permute(0,2,1).contiguous()
         in_ch = next(self.model.encoder.parameters()).shape[1]
         if X.size(1) < in_ch:
             X = torch.cat([X, X.new_zeros(1, in_ch - X.size(1), X.size(2))], dim=1)
@@ -502,7 +492,6 @@ class MotionManifoldSynthesizer:
         return X, J
 
     def _from_model_output(self, xhat, J):
-        # xhat: [1,C,T] normalized → local positions [1,T,J,3]
         pos_ch = J * 3
         Xhat_pos = xhat[:, :pos_ch, :].permute(0,2,1).contiguous().view(1, -1, J, 3)
         return Xhat_pos * (self.std + 1e-8) + self.mean_pose
@@ -519,7 +508,6 @@ class MotionManifoldSynthesizer:
         Xc, J = self._to_model_input(Pc, content_motion)
         Xs, _ = self._to_model_input(Ps, style_motion)
 
-        # capture style features from encoder
         feats_s = []
         with torch.no_grad():
             x = Xs
@@ -536,7 +524,6 @@ class MotionManifoldSynthesizer:
             if xhat.size(-1) > T: xhat = xhat[..., :T]
             elif xhat.size(-1) < T: xhat = torch.cat([xhat, xhat.new_zeros(1, xhat.size(1), T-xhat.size(-1))], dim=-1)
 
-            # content (positions) loss
             P_hat = self._from_model_output(xhat, J)
             Lc = F.mse_loss(P_hat, Pc)
 
@@ -643,65 +630,55 @@ class MotionManifoldSynthesizer:
 
         from dataloader import recover_global_motion  # local import to avoid circulars
 
-        # ---- Fetch & shape to [B,T,J,3] ----
-        positions = motion['positions'].to(self.device)  # [T,J,3] expected
+        positions = motion['positions'].to(self.device)
         if positions.dim() == 3:
-            positions = positions.unsqueeze(0)           # [1,T,J,3]
+            positions = positions.unsqueeze(0)
         B, T, J, _ = positions.shape
 
-        # ---- Corrupt (in local space) ----
         if corruption_params is not None:
             corrupted_local = self._apply_corruption(positions, corruption_type, corruption_params)
         else:
             corrupted_local = positions.clone()
 
-        # ---- Normalize positions (dataset-wide mean/std on local) ----
-        # mean_pose/std: [J,3]  -> broadcast to [B,T,J,3]
+    
         mean = self.mean_pose
         std  = self.std
-        Xpos = (corrupted_local - mean) / (std + 1e-8)   # [B,T,J,3]
+        Xpos = (corrupted_local - mean) / (std + 1e-8) 
 
-        # ---- Build model input [B,C,T] ----
-        # Base channels: J*3 (flattened positions)
         X_list = [Xpos.view(B, T, J * 3)]
 
-        # If the model was trained with extra channels, append them to match input_dim
-        in_ch = next(self.model.encoder.parameters()).shape[1]  # encoder first conv in_channels
+       # Extra step
+        in_ch = next(self.model.encoder.parameters()).shape[1]
 
-        # Append velocities if present and needed
+        #Unnormalized velocities if present
         extra_added = 0
         if 'trans_vel_xz' in motion and 'rot_vel_y' in motion:
-            tv = motion['trans_vel_xz'].to(self.device)  # [T,2]
-            ry = motion['rot_vel_y'].to(self.device)     # [T]
+            tv = motion['trans_vel_xz'].to(self.device)
+            ry = motion['rot_vel_y'].to(self.device)
             if tv.dim() == 2:
-                tv = tv.unsqueeze(0)                     # [1,T,2]
+                tv = tv.unsqueeze(0)
             if ry.dim() == 1:
-                ry = ry.unsqueeze(0)                     # [1,T]
-            X_list.append(tv)                             # [B,T,2]
-            X_list.append(ry.unsqueeze(-1))               # [B,T,1]
+                ry = ry.unsqueeze(0)
+            X_list.append(tv)
+            X_list.append(ry.unsqueeze(-1))
             extra_added = 3
 
-        X_btC = torch.cat(X_list, dim=-1)                 # [B,T,J*3 (+ 2 + 1 if present)]
-        X = X_btC.permute(0, 2, 1).contiguous()           # [B,C,T]
+        X_btC = torch.cat(X_list, dim=-1)
+        X = X_btC.permute(0, 2, 1).contiguous()
 
-        # If still under the model's expected channels, pad zeros (robustness)
         if X.size(1) < in_ch:
             padC = in_ch - X.size(1)
             X = torch.cat([X, X.new_zeros(B, padC, T)], dim=1)
         elif X.size(1) > in_ch:
-            # If too many channels, truncate to the model input
             X = X[:, :in_ch, :]
 
-        # ---- Manifold projection (denoising via autoencoder) ----
         with torch.no_grad():
-            x_hat, _ = self.model(X, corrupt_input=False)          # [B,C,T]
+            x_hat, _ = self.model(X, corrupt_input=False)
 
-        # ---- Extract reconstructed positions channels & unnormalize back to local space ----
         pos_ch = J * 3
-        Xhat_pos = x_hat[:, :pos_ch, :].permute(0, 2, 1).contiguous().view(B, T, J, 3)  # [B,T,J,3] (normalized)
+        Xhat_pos = x_hat[:, :pos_ch, :].permute(0, 2, 1).contiguous().view(B, T, J, 3)
         fixed_local = Xhat_pos * (std + 1e-8) + mean
 
-        # ---- If velocities exist, recover global for BOTH corrupted & fixed ----
         has_vel = ('trans_vel_xz' in motion) and ('rot_vel_y' in motion)
         if has_vel:
             trans_vel_xz = motion['trans_vel_xz'].to(self.device)
@@ -767,17 +744,14 @@ class MotionManifoldSynthesizer:
         assert B1 == B2 == 1, "This helper assumes batch size 1 for interpolation."
         assert J == J2, "Joint counts must match."
 
-        # Align time (use common prefix length)
         T = min(T1, T2)
         P1 = P1[:, :T]
         P2 = P2[:, :T]
 
-        # ---- Normalize local positions ----
         mean, std = self.mean_pose, self.std  # [J,3]
         X1_pos = (P1 - mean) / (std + 1e-8)   # [B,T,J,3]
         X2_pos = (P2 - mean) / (std + 1e-8)
 
-        # ---- Build model input [B,C,T] to match training channels ----
         def build_input(motion, Xpos):
             X_list = [Xpos.view(Xpos.size(0), Xpos.size(1), J * 3)]  # [B,T,J*3]
             if ("trans_vel_xz" in motion) and ("rot_vel_y" in motion):
@@ -800,7 +774,7 @@ class MotionManifoldSynthesizer:
         X1 = build_input(motion1, X1_pos)
         X2 = build_input(motion2, X2_pos)
 
-        # ---- Encode, interpolate in latent, decode ----
+
         with torch.no_grad():
             z1 = self.model.encode(X1)          # [B, D, T/4] (temporal latent)
             z2 = self.model.encode(X2)
@@ -813,7 +787,7 @@ class MotionManifoldSynthesizer:
             elif xhat.size(-1) < T:
                 xhat = torch.cat([xhat, xhat.new_zeros(xhat.size(0), xhat.size(1), T - xhat.size(-1))], dim=-1)
 
-        # ---- Extract position channels and unnormalize to local space ----
+        # Extract position channels and unnormalize to local space
         pos_ch = J * 3
         Xhat_pos = xhat[:, :pos_ch, :].permute(0, 2, 1).contiguous().view(1, T, J, 3)  # [B,T,J,3]
         P_interp = Xhat_pos * (std + 1e-8) + mean                                      # local (global-removed)
@@ -870,7 +844,7 @@ def main():
     output_dir = args.out_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    # ---- Train ----
+    #Train
     trainer = MotionManifoldTrainer(
         data_dir=data_dir,
         output_dir=output_dir,
@@ -885,7 +859,7 @@ def main():
     )
     trainer.train()
 
-    # ---- Inference demos ----
+    # Inference demos
     # Build synthesizer with the just-trained model
     model_path = os.path.join(output_dir, "models", "motion_autoencoder.pt")
     synth = MotionManifoldSynthesizer(model_path=model_path, dataset=trainer.dataset)

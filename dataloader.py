@@ -144,7 +144,6 @@ class CMUMotionDataset(Dataset):
 
         return self.mean_pose, self.std
 
-
         
         self.mean_pose = np.zeros_like(motion_data[list(motion_data.keys())[0]]['positions'][0])
         self.std = np.zeros_like(motion_data[list(motion_data.keys())[0]]['positions'][0])
@@ -521,10 +520,8 @@ class CMUMotionDataset(Dataset):
         # 3. TODO: Apply normalization to necessary part of the motion data to compute positions_normalized.
         #positions_normalized = None
 
-         # ---------- NEW: apply normalization over LOCAL positions ----------
-        # self.mean_pose/std have shape [J,3]; broadcast over [T,J,3]
+        # self.mean_pose/std
         positions_normalized = (local_positions - self.mean_pose) / (self.std + 1e-8)
-        # -------------------------------------------------------------------
         
         # 4. Create flat versions for the model
         # Reshape: [time, joints, 3] -> [time, joints*3]

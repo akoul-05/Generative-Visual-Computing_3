@@ -19,3 +19,13 @@ output/
 # Data (keep CMU/BVH out of git)
 data/
 cmu-mocap/
+# Datasets & caches (do NOT commit)
+cmu-mocap/
+cmu-mocap/**
+
+# Large artifacts
+*.pkl
+*.npy
+
+# Colab checkpoints
+.ipynb_checkpoints/
